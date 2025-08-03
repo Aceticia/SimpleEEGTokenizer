@@ -1,0 +1,21 @@
+# Main configuration file for EEG Autoencoder training
+defaults:
+  - model: mlp_autoencoder
+  - training: default
+  - trainer: default
+  - data: dummy
+  - logger: wandb
+  - _self_
+
+# Experiment settings
+seed: 42
+experiment_name: null
+print_config: true
+
+# Override any defaults here
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ./multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra:job.num}

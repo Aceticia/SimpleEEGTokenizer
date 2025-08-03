@@ -1,0 +1,16 @@
+# @package _global_
+data:
+  batch_size: 32
+  num_workers: 4
+  persistent_workers: true
+  pin_memory: true
+
+  # Dummy dataset parameters
+  train_num_batches: 1000
+  val_num_batches: 500
+  patch_size: ${model.patch_size}
+  use_conditioning: ${model.use_conditioning}
+
+  # Data augmentation (for future use)
+  normalize: true
+  data_range: [-1.0, 1.0]

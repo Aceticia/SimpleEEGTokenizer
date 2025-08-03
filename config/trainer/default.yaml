@@ -1,0 +1,15 @@
+# @package _global_
+trainer:
+  # Training configuration
+  max_epochs: ${training.max_epochs}
+  accelerator: "auto"
+  devices: "auto"
+  precision: "16-mixed"
+  
+  # Logging and checkpointing
+  log_every_n_steps: ${training.log_every_n_steps}
+  gradient_clip_val: 1.0
+  deterministic: true
+  enable_progress_bar: true
+  enable_model_summary: true
+  check_val_every_n_epoch: 1

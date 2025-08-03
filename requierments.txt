@@ -1,0 +1,9 @@
+torch
+torchvision
+lightning
+litdata
+torchmetrics
+vector-quantize-pytorch
+wandb
+hydra-core
+omegaconf

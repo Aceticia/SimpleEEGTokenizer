@@ -1,0 +1,12 @@
+# @package _global_
+logger:
+  _target_: 
+
+  project: "eeg-autoencoder"
+  name: ${experiment_name}
+  save_dir: "./logs"
+  log_model: false  # Set to true only if you want to upload model weights
+  tags:
+    - "eeg"
+    - "autoencoder"
+    - "fsq"

@@ -1,0 +1,21 @@
+# @package _global_
+
+# Experiment with Snake activation
+defaults:
+  - override /model: mlp_autoencoder
+
+experiment_name: "snake_activation_experiment"
+
+model:
+  activation: "snake"
+  learning_rate: 0.0005  # Lower LR for snake activation
+  warmup_epochs: 15      # Longer warmup
+
+logger:
+  name: "${experiment_name}"
+  tags:
+    - "eeg"
+    - "autoencoder"
+    - "fsq" 
+    - "snake"
+    - "experiment"
