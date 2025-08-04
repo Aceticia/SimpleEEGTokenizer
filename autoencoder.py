@@ -1,158 +1,92 @@
+import math
+from functools import partial
 from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from timm.layers import Mlp
 from vector_quantize_pytorch import FSQ
 
 
-def get_activation(dim, activation_type):
-    if activation_type == "snake":
-        return SnakeActivation(dim)
-    elif activation_type == "gelu":
-        return nn.GELU()
-    else:
-        return nn.ReLU()
+def modulate(x, shift, scale):
+    return x * scale + shift
 
 
-class SnakeActivation(nn.Module):
+class TimestepEmbedder(nn.Module):
     """
-    Snake activation function with learnable parameters: x + (1/a) * sin^2(a*x)
-    Paper: https://arxiv.org/abs/2006.08195
+    Embeds scalar timesteps into vector representations.
     """
 
-    def __init__(self, in_features: int, alpha: float = 1.0):
+    def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
-        # Learnable frequency parameter per feature
-        self.alpha = nn.Parameter(torch.ones(in_features) * alpha)
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+        )
+        self.frequency_embedding_size = frequency_embedding_size
 
-    def forward(self, x):
-        return x + (1 / self.alpha) * torch.sin(self.alpha * x) ** 2
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D Tensor of N indices, one per batch element.
+                          These may be fractional.
+        :param dim: the dimension of the output.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: an (N, D) Tensor of positional embeddings.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32)
+            / half
+        ).to(device=t.device)
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat(
+                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
+            )
+        return embedding
+
+    def forward(self, t):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_emb = self.mlp(t_freq)
+        return t_emb[:, 0]
 
 
-class FiLMLayer(nn.Module):
-    """
-    Feature-wise Linear Modulation layer for conditioning
-    """
-
-    def __init__(self, feature_dim: int, condition_dim: int):
+class Block(nn.Module):
+    def __init__(self, hidden_size, mlp_ratio=4.0, condition_dim=None, dropout=0.0):
         super().__init__()
-        self.scale_net = nn.Linear(condition_dim, feature_dim)
-        self.shift_net = nn.Linear(condition_dim, feature_dim)
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
 
-    def forward(self, x, condition):
-        """
-        Apply FiLM conditioning
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=partial(nn.GELU, approximate="tanh"),
+            norm_layer=nn.LayerNorm,
+            drop=0.0,
+        )
 
-        Args:
-            x: Features of shape [batch_size, feature_dim]
-            condition: Conditioning vector of shape [batch_size, condition_dim]
-
-        Returns:
-            Conditioned features
-        """
-        scale = self.scale_net(condition)
-        shift = self.shift_net(condition)
-        return x * (1 + scale) + shift
-
-
-class ResidualMLPBlock(nn.Module):
-    """
-    A modular MLP block with optional residual connections, normalization,
-    dropout, and FiLM conditioning.
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int,
-        activation_name: str = "relu",
-        dropout: float = 0.0,
-        norm_type: str = None,
-        use_residual: bool = False,
-        use_gelu_gating: bool = False,
-        use_film: bool = False,
-        condition_dim: int = None,
-    ):
-        super().__init__()
-
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.use_residual = use_residual and (
-            in_dim == out_dim
-        )  # Only residual if dims match
-        self.use_film = use_film
-        self.use_gelu_gating = use_gelu_gating
-
-        # Main transformation
-        if use_gelu_gating:
-            # For gating, we need two linear layers (gate and value)
-            self.linear_gate = nn.Linear(in_dim, out_dim)
-            self.linear_value = nn.Linear(in_dim, out_dim)
+        if condition_dim is not None:
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(), nn.Linear(condition_dim, 3 * hidden_size, bias=True)
+            )
         else:
-            self.linear = nn.Linear(in_dim, out_dim)
+            self.adaLN_modulation = None
 
-        # Normalization
-        if norm_type == "layer":
-            self.norm = nn.LayerNorm(out_dim)
-        elif norm_type == "rms":
-            self.norm = nn.RMSNorm(out_dim)
-        elif norm_type == "batch":
-            self.norm = nn.BatchNorm1d(out_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, c):
+        if self.adaLN_modulation is not None:
+            shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(3, dim=1)
+            x = x + gate_mlp * self.mlp(modulate(self.norm(x), shift_mlp, scale_mlp))
         else:
-            self.norm = nn.Identity()
-
-        # Activation
-        self.activation = get_activation(out_dim, activation_name)
-
-        # Dropout
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        # FiLM conditioning
-        if use_film and condition_dim is not None:
-            self.film = FiLMLayer(out_dim, condition_dim)
-        else:
-            self.film = None
-
-    def forward(self, x, condition_emb=None):
-        """
-        Forward pass with optional residual connection and conditioning
-
-        Args:
-            x: Input tensor [batch_size, in_dim]
-            condition_emb: Optional conditioning embedding [batch_size, condition_dim]
-
-        Returns:
-            Output tensor [batch_size, out_dim]
-        """
-        # Store input for potential residual connection
-        residual = x if self.use_residual else None
-
-        # Main transformation
-        if self.use_gelu_gating:
-            # GELU gating: gate * GELU(value)
-            gate = self.linear_gate(x)
-            value = self.linear_value(x)
-            x = gate * F.gelu(value)
-        else:
-            x = self.linear(x)
-
-        x = self.norm(x)
-
-        # Apply activation only if not using GELU gating
-        if not self.use_gelu_gating:
-            x = self.activation(x)
-
-        # Apply FiLM conditioning if enabled
-        if self.film is not None and condition_emb is not None:
-            x = self.film(x, condition_emb)
-
+            x = x + self.mlp(self.norm(x))
         x = self.dropout(x)
-
-        # Add residual connection if enabled
-        if self.use_residual and residual is not None:
-            x = x + residual
-
         return x
 
 
@@ -167,8 +101,10 @@ class MLPAutoencoder(nn.Module):
         patch_size: int,
         levels: list = [8, 8, 8, 5, 5, 5],  # FSQ levels
         use_conditioning: bool = False,
-        condition_dim: int = 16,  # Dimension for sampling rate embedding
-        max_sampling_rate: float = 1000.0,  # Maximum expected sampling rate for normalization
+        sr_condition_dim: int = 16,
+        sr_freq_dim: int = 32,
+        log_sr_embedding: bool = False,
+        max_sampling_rate: float = 2000.0,
         encoder_config: Optional[dict] = None,
         decoder_config: Optional[dict] = None,
     ):
@@ -178,136 +114,78 @@ class MLPAutoencoder(nn.Module):
         self.patch_size = patch_size
         self.codebook_dim = codebook_dim
         self.use_conditioning = use_conditioning
+        self.log_sr_embedding = log_sr_embedding
+        self.sr_freq_dim = sr_freq_dim
         self.max_sampling_rate = max_sampling_rate
         self.encoder_config = encoder_config
         self.decoder_config = decoder_config
 
         # Sampling rate embedding if conditioning is used
         if use_conditioning:
-            self.sr_embedding = nn.Sequential(
-                nn.Linear(1, condition_dim),
-                nn.ReLU(),
-                nn.Linear(condition_dim, condition_dim),
+            self.sr_embedding = TimestepEmbedder(
+                hidden_size=sr_condition_dim,
+                frequency_embedding_size=sr_freq_dim,
             )
 
         # Encoder: compress patch_size -> codebook_dim
         encoder_blocks = []
-        in_dim = patch_size
-
-        for i, hidden_dim in enumerate(encoder_config["hidden_dims"]):
-            block = ResidualMLPBlock(
-                in_dim=in_dim,
-                out_dim=hidden_dim,
-                activation_name=encoder_config["activation"],
+        self.encoder_proj = nn.Linear(encoder_config["hidden_dim"], codebook_dim)
+        self.input_proj = nn.Linear(patch_size, encoder_config["hidden_dim"])
+        for _ in range(encoder_config["n_layers"]):
+            block = Block(
+                hidden_size=encoder_config["hidden_dim"],
                 dropout=encoder_config["dropout"],
-                norm_type=encoder_config["norm_type"],
-                use_residual=encoder_config["use_residual"],
-                use_gelu_gating=encoder_config["use_gelu_gating"],
-                use_film=use_conditioning,
-                condition_dim=condition_dim if use_conditioning else None,
+                mlp_ratio=encoder_config["mlp_ratio"],
+                condition_dim=sr_condition_dim if use_conditioning else None,
             )
             encoder_blocks.append(block)
-            in_dim = hidden_dim
-
-        # Final projection to codebook dimension
-        self.encoder_proj = nn.Linear(in_dim, codebook_dim)
         self.encoder_blocks = nn.ModuleList(encoder_blocks)
-
-        # Add projection layer from encoder output to FSQ dimension
-        self.fsq_dim = len(levels)
-        self.to_fsq = nn.Linear(codebook_dim, self.fsq_dim)
-        self.from_fsq = nn.Linear(self.fsq_dim, codebook_dim)
 
         # FSQ quantization layer
         self.quantizer = FSQ(levels=levels)
 
         # Decoder: decompress codebook_dim -> patch_size
         decoder_blocks = []
-
-        # Start with the first hidden dimension
-        first_hidden_dim = decoder_config["hidden_dims"][0]
-        self.decoder_proj = nn.Linear(codebook_dim, first_hidden_dim)
-        in_dim = first_hidden_dim
-
-        # Skip the first dimension since we already projected to it
-        remaining_dims = list(reversed(decoder_config["hidden_dims"]))[1:]
-        for i, hidden_dim in enumerate(remaining_dims):
-            block = ResidualMLPBlock(
-                in_dim=in_dim,
-                out_dim=hidden_dim,
-                activation_name=decoder_config["activation"],
+        self.decoder_proj = nn.Linear(codebook_dim, decoder_config["hidden_dim"])
+        self.output_proj = nn.Linear(decoder_config["hidden_dim"], patch_size)
+        for _ in range(decoder_config["n_layers"]):
+            block = Block(
+                hidden_size=decoder_config["hidden_dim"],
                 dropout=decoder_config["dropout"],
-                norm_type=decoder_config["norm_type"],
-                use_residual=decoder_config["use_residual"],
-                use_gelu_gating=decoder_config["use_gelu_gating"],
-                use_film=use_conditioning,
-                condition_dim=condition_dim if use_conditioning else None,
+                mlp_ratio=decoder_config["mlp_ratio"],
+                condition_dim=sr_condition_dim if use_conditioning else None,
             )
             decoder_blocks.append(block)
-            in_dim = hidden_dim
-
         self.decoder_blocks = nn.ModuleList(decoder_blocks)
-        self.output_proj = nn.Linear(in_dim, patch_size)
 
     def _get_sampling_rate_embedding(self, sampling_rate):
-        """Convert sampling rate to embedding"""
-        # Normalize sampling rate to [0, 1] range
-        normalized_sr = sampling_rate / self.max_sampling_rate
-        normalized_sr = torch.clamp(normalized_sr, 0, 1)
-
-        # Add batch dimension if needed
-        if normalized_sr.dim() == 0:
-            normalized_sr = normalized_sr.unsqueeze(0)
-        if normalized_sr.dim() == 1:
-            normalized_sr = normalized_sr.unsqueeze(-1)
-
+        if self.log_sr_embedding:
+            log_sr = torch.log1p(sampling_rate)
+            log_max_sr = torch.log1p(self.max_sampling_rate)
+            normalized_sr = log_sr / log_max_sr
+        else:
+            normalized_sr = sampling_rate / self.max_sampling_rate
         return self.sr_embedding(normalized_sr)
 
     def encode(self, x, sampling_rate=None):
-        """
-        Encode input to latent space
-
-        Args:
-            x: Input tensor of shape [batch_size, patch_size]
-            sampling_rate: Sampling rate tensor of shape [batch_size] or scalar
-        """
         condition_emb = None
         if self.use_conditioning and sampling_rate is not None:
             condition_emb = self._get_sampling_rate_embedding(sampling_rate)
 
-        h = x
+        h = self.input_proj(x)
         for block in self.encoder_blocks:
             h = block(h, condition_emb)
 
         return self.encoder_proj(h)
 
     def quantize(self, z):
-        """Quantize latent codes using FSQ"""
-        # Project to FSQ dimension
-        z_fsq = self.to_fsq(z)
-
-        # Add sequence dimension for FSQ (expects 3D: batch, seq, features)
-        z_fsq = z_fsq.unsqueeze(1)  # [batch, 1, fsq_dim]
-
+        z_fsq = z.unsqueeze(1)  # [batch, 1, fsq_dim]
         quantized_fsq, indices = self.quantizer(z_fsq)
-
-        # Remove sequence dimension and project back to codebook dimension
         quantized_fsq = quantized_fsq.squeeze(1)  # [batch, fsq_dim]
-        quantized = self.from_fsq(quantized_fsq)
-
-        # Indices also need sequence dimension removed
         indices = indices.squeeze(1)  # [batch, 1] -> [batch]
-
-        return quantized, indices
+        return quantized_fsq, indices
 
     def decode(self, z, sampling_rate=None):
-        """
-        Decode from latent space
-
-        Args:
-            z: Latent codes of shape [batch_size, codebook_dim]
-            sampling_rate: Sampling rate tensor of shape [batch_size] or scalar
-        """
         condition_emb = None
         if self.use_conditioning and sampling_rate is not None:
             condition_emb = self._get_sampling_rate_embedding(sampling_rate)
@@ -319,97 +197,7 @@ class MLPAutoencoder(nn.Module):
         return self.output_proj(h)
 
     def forward(self, x, sampling_rate=None):
-        """
-        Forward pass through autoencoder
-
-        Args:
-            x: Input tensor of shape [batch_size, patch_size]
-            sampling_rate: Optional sampling rate for conditioning
-
-        Returns:
-            reconstruction: Reconstructed input
-            quantized: Quantized latent codes
-            indices: Quantization indices
-        """
-        # Encode
         z = self.encode(x, sampling_rate)
-
-        # Quantize
         quantized, indices = self.quantize(z)
-
-        # Decode
         reconstruction = self.decode(quantized, sampling_rate)
-
         return reconstruction, quantized, indices
-
-    def get_codebook_usage(self, dataloader, device="cuda"):
-        """
-        Compute codebook usage statistics
-
-        Args:
-            dataloader: DataLoader to compute statistics on
-            device: Device to run computation on
-
-        Returns:
-            usage_stats: Dictionary with codebook usage statistics
-        """
-        self.eval()
-        all_indices = []
-
-        with torch.no_grad():
-            for batch in dataloader:
-                if isinstance(batch, (list, tuple)):
-                    if len(batch) >= 2:
-                        x, sampling_rate = batch[0].to(device), batch[1].to(device)
-                    else:
-                        x, sampling_rate = batch[0].to(device), None
-                else:
-                    x, sampling_rate = batch.to(device), None
-
-                _, _, indices = self.forward(x, sampling_rate)
-                all_indices.append(indices.cpu())
-
-        all_indices = torch.cat(all_indices, dim=0)
-
-        # Calculate usage statistics
-        unique_codes = torch.unique(all_indices.flatten())
-        total_possible_codes = torch.prod(torch.tensor(self.quantizer.levels))
-        usage_rate = len(unique_codes) / total_possible_codes.item()
-
-        return {
-            "unique_codes_used": len(unique_codes),
-            "total_possible_codes": total_possible_codes.item(),
-            "usage_rate": usage_rate,
-            "indices_shape": all_indices.shape,
-        }
-
-
-if __name__ == "__main__":
-    # Example usage
-    patch_size = 128
-    encoder_config = {
-        "hidden_dims": [256, 128],
-        "dropout": 0.1,
-        "norm_type": "rms",
-        "use_residual": True,
-        "use_gelu_gating": False,
-        "activation": "gelu",
-    }
-    decoder_config = {
-        "hidden_dims": [128, 256],
-        "dropout": 0.1,
-        "norm_type": "rms",
-        "use_residual": True,
-        "use_gelu_gating": True,
-        "activation": "gelu",
-    }
-
-    model = MLPAutoencoder(
-        patch_size=patch_size,
-        encoder_config=encoder_config,
-        decoder_config=decoder_config,
-        use_conditioning=True,
-        condition_dim=16,
-    )
-
-    print(model)

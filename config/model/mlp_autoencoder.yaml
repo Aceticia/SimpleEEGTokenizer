@@ -6,23 +6,21 @@ model:
 
   # Encoder configuration
   encoder_config:
-    hidden_dims: [512, 512, 512]
+    hidden_dim: 512
+    n_layers: 4
+    mlp_ratio: 4.0
     dropout: 0.1
-    norm_type: layer
-    use_residual: false
-    use_gelu_gating: false
-    activation: "relu"
 
   # Decoder configuration
   decoder_config:
-    hidden_dims: [512, 512, 512]
+    hidden_dim: 512
+    n_layers: 4
+    mlp_ratio: 4.0
     dropout: 0.1
-    norm_type: layer
-    use_residual: false
-    use_gelu_gating: false
-    activation: "relu"
 
   # Conditioning parameters
-  use_conditioning: false
-  condition_dim: 16
-  max_sampling_rate: 1000.0
+  use_conditioning: true
+  sr_condition_dim: 64
+  sr_freq_dim: 64
+  log_sr_embedding: false
+  max_sampling_rate: 2000.0

@@ -131,18 +131,11 @@ trainer:
   gradient_clip_val: 1.0
 ```
 
-### Experiment Presets (`config/experiment/`)
-Pre-configured experiments for different research directions:
-- `snake_activation.yaml`: Snake activation with tuned hyperparameters
-- `conditioning.yaml`: Sampling rate conditioning experiment
-
 ## Metrics
 
 The system tracks comprehensive reconstruction metrics:
 
 - **Loss Metrics**: MSE, MAE, RMSE, NRMSE
-- **Quality Metrics**: PSNR, SSIM, SNR, Pearson correlation, Cosine similarity
-- **Quantization Metrics**: Codebook usage ratio, unique codes used
 - **Training Metrics**: Learning rate, gradient norms
 
 ## Data Loading
@@ -159,15 +152,6 @@ def create_dummy_dataloader(cfg: DictConfig):
 Expected data format:
 - **Input**: `[batch_size, patch_size]` tensor
 - **Conditioning** (optional): `[batch_size, 1]` sampling rate tensor
-
-## Experiment Tracking
-
-W&B integration provides:
-- Hyperparameter logging
-- Real-time metric tracking  
-- Model checkpoint management
-- Experiment comparison
-- Codebook usage visualization
 
 ## Advanced Usage
 
@@ -204,18 +188,6 @@ scheduler:
 1. Import in `lightning_module.py`
 2. Add to metric collections
 3. Update logging in training/validation steps
-
-### Custom Experiments
-Create new experiment configs in `config/experiment/`:
-```yaml
-# config/experiment/my_experiment.yaml
-defaults:
-  - override /model: mlp_autoencoder
-  
-experiment_name: "my_experiment"
-model:
-  # Your custom parameters
-```
 
 ## Citation
 

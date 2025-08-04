@@ -7,3 +7,5 @@ vector-quantize-pytorch
 wandb
 hydra-core
 omegaconf
+timm
+transformers
