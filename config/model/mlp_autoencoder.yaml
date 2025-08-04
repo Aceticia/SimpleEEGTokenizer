@@ -1,26 +1,26 @@
 # @package _global_
 model:
   # Model architecture
-  patch_size: 256
+  patch_size: 200
   levels: [8, 8, 8, 5, 5, 5] # FSQ levels
 
   # Encoder configuration
   encoder_config:
     hidden_dim: 512
-    n_layers: 4
+    n_layers: 6
     mlp_ratio: 4.0
     dropout: 0.1
 
   # Decoder configuration
   decoder_config:
     hidden_dim: 512
-    n_layers: 4
+    n_layers: 6
     mlp_ratio: 4.0
     dropout: 0.1
 
   # Conditioning parameters
   use_conditioning: true
-  sr_condition_dim: 64
-  sr_freq_dim: 64
-  log_sr_embedding: false
+  sr_condition_dim: 256
+  sr_freq_dim: 256
+  log_sr_embedding: true
   max_sampling_rate: 2000.0

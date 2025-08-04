@@ -14,28 +14,18 @@ class EEGAutoencoderLightning(L.LightningModule):
     def __init__(
         self,
         model_config: dict,
-        # Training parameters
-        learning_rate: float = 1e-3,
-        weight_decay: float = 1e-5,
-        warmup_epochs: int = 10,
-        max_epochs: int = 100,
-        warmup_start_lr: float = 1e-6,
-        eta_min: float = 1e-6,
         log_every_n_steps: int = 50,
+        lr: float = 1e-3,
+        weight_decay: float = 1e-5,
     ):
         super().__init__()
         self.save_hyperparameters()
 
+        self.learning_rate = lr
+        self.weight_decay = weight_decay
+
         # Store the model
         self.autoencoder = MLPAutoencoder(**model_config)
-
-        # Training parameters
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.warmup_epochs = warmup_epochs
-        self.max_epochs = max_epochs
-        self.warmup_start_lr = warmup_start_lr
-        self.eta_min = eta_min
         self.log_every_n_steps = log_every_n_steps
 
         # Initialize comprehensive torchmetrics
@@ -49,27 +39,18 @@ class EEGAutoencoderLightning(L.LightningModule):
         self.train_metrics = metrics.clone(prefix="train/")
         self.val_metrics = metrics.clone(prefix="val/")
 
-    def forward(self, x, sampling_rate=None):
+    def forward(self, x, sampling_rate=None, data_type=None):
         """Forward pass through the autoencoder"""
-        return self.autoencoder(x, sampling_rate)
+        return self.autoencoder(x, sampling_rate, data_type)
 
     def _compute_loss(self, batch):
-        # Handle different batch formats
-        if isinstance(batch, (list, tuple)):
-            if len(batch) >= 2:
-                x, sampling_rate = batch[0], batch[1]
-            else:
-                x, sampling_rate = batch[0], None
-        else:
-            x, sampling_rate = batch, None
-
-        # Forward pass
-        reconstruction, quantized, indices = self.forward(x, sampling_rate)
+        x, sfreq, data_type = batch
+        reconstruction, quantized, indices = self.forward(x, sfreq, data_type)
 
         # Compute MSE loss
-        mse_loss = F.mse_loss(reconstruction, x)
+        mse_loss = F.mse_loss(reconstruction, x.to(reconstruction.dtype))
 
-        return mse_loss, reconstruction, x, sampling_rate, quantized, indices
+        return mse_loss, reconstruction, x, sfreq, quantized, indices
 
     def _step(self, batch, batch_idx, prefix="train"):
         """Training step"""

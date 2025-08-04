@@ -1,61 +1,46 @@
 import os
+from functools import partial
 
 import hydra
 import lightning as L
 import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
+from litdata import StreamingDataLoader, StreamingDataset
 from omegaconf import DictConfig, OmegaConf
 
 from lightning_module import EEGAutoencoderLightning
 
 
-def create_dummy_dataloader(cfg: DictConfig):
-    """
-    Create a dummy dataloader for testing purposes.
-    Replace this with your actual EEG data loading logic.
-    """
+def transform(sample, patch_size):
+    length = len(sample[0])
+    signal = sample[0]
+    if length > patch_size:
+        start = torch.randint(0, length - patch_size + 1, (1,)).item()
+        signal = signal[start : start + patch_size]
+    return signal, sample[1], sample[2]
 
-    class DummyDataset(torch.utils.data.Dataset):
-        def __init__(
-            self, num_samples: int, patch_size: int, use_conditioning: bool = False
-        ):
-            self.num_samples = num_samples
-            self.patch_size = patch_size
-            self.use_conditioning = use_conditioning
 
-        def __len__(self):
-            return self.num_samples
+def create_dataloader(cfg: DictConfig, patch_size: int = 100):
+    train_dataset = StreamingDataset(
+        cfg.data.train_data_path,
+        shuffle=True,
+        drop_last=True,
+        transform=partial(transform, patch_size=patch_size),
+    )
+    val_dataset = StreamingDataset(
+        cfg.data.val_data_path,
+        shuffle=False,
+        drop_last=False,
+        transform=partial(transform, patch_size=patch_size),
+    )
 
-        def __getitem__(self, idx):
-            # Generate random EEG-like data (normalized to data_range)
-            x = torch.randn(self.patch_size) * 0.1
-            x = torch.clamp(x, cfg.data.data_range[0], cfg.data.data_range[1])
-
-            if self.use_conditioning:
-                # Random sampling rate between 100-1000 Hz
-                sampling_rate = torch.rand(1) * 900 + 100
-                return x, sampling_rate
-            else:
-                return x
-
-    def create_loader(num_batches: int):
-        dataset = DummyDataset(
-            num_samples=num_batches * cfg.data.batch_size,
-            patch_size=cfg.data.patch_size,
-            use_conditioning=cfg.data.use_conditioning,
-        )
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=cfg.data.batch_size,
-            shuffle=True,
-            num_workers=cfg.data.num_workers,
-            persistent_workers=cfg.data.persistent_workers,
-            pin_memory=cfg.data.pin_memory,
-        )
-
-    train_loader = create_loader(cfg.data.train_num_batches)
-    val_loader = create_loader(cfg.data.val_num_batches)
+    train_loader = StreamingDataLoader(
+        train_dataset, batch_size=cfg.data.batch_size, num_workers=cfg.data.num_workers
+    )
+    val_loader = StreamingDataLoader(
+        val_dataset, batch_size=cfg.data.batch_size, num_workers=cfg.data.num_workers
+    )
 
     return train_loader, val_loader
 
@@ -118,19 +103,12 @@ def train(cfg: DictConfig) -> None:
     # Create Lightning module by directly passing the model and training config
     print("Creating Lightning module...")
     model = EEGAutoencoderLightning(
-        model_config=cfg.model,
-        learning_rate=cfg.training.learning_rate,
-        weight_decay=cfg.training.weight_decay,
-        warmup_epochs=cfg.training.warmup_epochs,
-        max_epochs=cfg.training.max_epochs,
-        warmup_start_lr=cfg.training.warmup_start_lr,
-        eta_min=cfg.training.eta_min,
-        log_every_n_steps=cfg.training.log_every_n_steps,
+        model_config=cfg.model, log_every_n_steps=cfg.training.log_every_n_steps
     )
 
     # Create data loaders
     print("Creating data loaders...")
-    train_loader, val_loader = create_dummy_dataloader(cfg)
+    train_loader, val_loader = create_dataloader(cfg, patch_size=cfg.model.patch_size)
 
     # Setup callbacks
     callbacks = setup_callbacks(cfg, save_dir)
@@ -158,27 +136,7 @@ def train(cfg: DictConfig) -> None:
             )
 
     # Train the model
-    try:
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
-    except KeyboardInterrupt:
-        print("Training interrupted by user.")
-    except Exception as e:
-        print(f"Training failed with error: {e}")
-        raise
-    finally:
-        # Finish wandb run if using wandb
-        if (
-            logger
-            and hasattr(logger, "experiment")
-            and hasattr(logger.experiment, "finish")
-        ):
-            try:
-                logger.experiment.finish()
-            except:
-                pass
-
-    print(f"Training artifacts saved in: {save_dir}/checkpoints/")
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 
 if __name__ == "__main__":

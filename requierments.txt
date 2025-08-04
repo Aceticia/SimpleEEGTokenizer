@@ -9,3 +9,6 @@ hydra-core
 omegaconf
 timm
 transformers
+mne
+pandas
+moabb

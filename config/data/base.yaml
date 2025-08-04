@@ -1,0 +1,9 @@
+# @package _global_
+data:
+  batch_size: 4096
+  num_workers: 8
+  persistent_workers: true
+  pin_memory: true
+
+  train_data_path: "/gpfs/data/oermannlab/public_data/eeg_datasets/simple_tok_pretrain/train"
+  val_data_path: "/gpfs/data/oermannlab/public_data/eeg_datasets/simple_tok_pretrain/test"

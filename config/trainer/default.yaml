@@ -1,7 +1,6 @@
 # @package _global_
 trainer:
   # Training configuration
-  max_epochs: ${training.max_epochs}
   accelerator: "auto"
   devices: "auto"
   precision: "16-mixed"

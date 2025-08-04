@@ -3,7 +3,7 @@ defaults:
   - model: mlp_autoencoder
   - training: default
   - trainer: default
-  - data: dummy
+  - data: base
   - logger: wandb
   - _self_
 

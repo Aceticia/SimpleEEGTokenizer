@@ -54,7 +54,7 @@ class TimestepEmbedder(nn.Module):
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
-        return t_emb[:, 0]
+        return t_emb
 
 
 class Block(nn.Module):
@@ -126,6 +126,10 @@ class MLPAutoencoder(nn.Module):
                 hidden_size=sr_condition_dim,
                 frequency_embedding_size=sr_freq_dim,
             )
+            self.dataset_type_embedding = nn.Embedding(
+                num_embeddings=3,  # EEG, iEEG, MEG
+                embedding_dim=sr_condition_dim,
+            )
 
         # Encoder: compress patch_size -> codebook_dim
         encoder_blocks = []
@@ -161,22 +165,23 @@ class MLPAutoencoder(nn.Module):
     def _get_sampling_rate_embedding(self, sampling_rate):
         if self.log_sr_embedding:
             log_sr = torch.log1p(sampling_rate)
-            log_max_sr = torch.log1p(self.max_sampling_rate)
-            normalized_sr = log_sr / log_max_sr
+            normalized_sr = log_sr / math.log(self.max_sampling_rate + 1.0)
         else:
             normalized_sr = sampling_rate / self.max_sampling_rate
-        return self.sr_embedding(normalized_sr)
+        out = self.sr_embedding(normalized_sr)
+        return out
 
-    def encode(self, x, sampling_rate=None):
+    def encode(self, x, sampling_rate=None, dataset_type=None):
         condition_emb = None
         if self.use_conditioning and sampling_rate is not None:
             condition_emb = self._get_sampling_rate_embedding(sampling_rate)
+            condition_emb = self.dataset_type_embedding(dataset_type) + condition_emb
 
-        h = self.input_proj(x)
+        h = self.input_proj(x.to(self.encoder_proj.weight.dtype))
         for block in self.encoder_blocks:
             h = block(h, condition_emb)
 
-        return self.encoder_proj(h)
+        return self.encoder_proj(h), condition_emb
 
     def quantize(self, z):
         z_fsq = z.unsqueeze(1)  # [batch, 1, fsq_dim]
@@ -185,10 +190,10 @@ class MLPAutoencoder(nn.Module):
         indices = indices.squeeze(1)  # [batch, 1] -> [batch]
         return quantized_fsq, indices
 
-    def decode(self, z, sampling_rate=None):
-        condition_emb = None
-        if self.use_conditioning and sampling_rate is not None:
+    def decode(self, z, sampling_rate=None, dataset_type=None, condition_emb=None):
+        if condition_emb is None and self.use_conditioning:
             condition_emb = self._get_sampling_rate_embedding(sampling_rate)
+            condition_emb = self.dataset_type_embedding(dataset_type) + condition_emb
 
         h = self.decoder_proj(z)
         for block in self.decoder_blocks:
@@ -196,8 +201,41 @@ class MLPAutoencoder(nn.Module):
 
         return self.output_proj(h)
 
-    def forward(self, x, sampling_rate=None):
-        z = self.encode(x, sampling_rate)
+    def forward(self, x, sampling_rate=None, dataset_type=None):
+        z, condition_emb = self.encode(x, sampling_rate, dataset_type)
         quantized, indices = self.quantize(z)
-        reconstruction = self.decode(quantized, sampling_rate)
+        reconstruction = self.decode(
+            quantized, sampling_rate, dataset_type, condition_emb=condition_emb
+        )
         return reconstruction, quantized, indices
+
+
+if __name__ == "__main__":
+    # Example usage
+    model = MLPAutoencoder(
+        patch_size=128,
+        levels=[8, 8, 8, 5, 5, 5],
+        use_conditioning=True,
+        sr_condition_dim=16,
+        sr_freq_dim=32,
+        log_sr_embedding=True,
+        max_sampling_rate=2000.0,
+        encoder_config={
+            "hidden_dim": 256,
+            "n_layers": 4,
+            "dropout": 0.1,
+            "mlp_ratio": 4.0,
+        },
+        decoder_config={
+            "hidden_dim": 256,
+            "n_layers": 4,
+            "dropout": 0.1,
+            "mlp_ratio": 4.0,
+        },
+    )
+
+    # Dummy input
+    x = torch.randn(10, 128)  # Batch of 10 samples,
+    sampling_rate = torch.tensor([1000.0] * 10)  # Example sampling rate
+    dataset_type = torch.tensor([0] * 10)  # Example dataset type
+    print([a.shape for a in model(x, sampling_rate, dataset_type)])
